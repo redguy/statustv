@@ -46,6 +46,8 @@ sub chrome_next_tab {
     $idx = (($idx - 1) % $ntabs) + 1; # tab idx is 1-based
      
     $window->set(active_tab_index => $idx);
+    $window->active_tab->reload();
+
 }
 
 sub process_ir {
@@ -119,7 +121,7 @@ sub check_timer {
 }
 
 sub keepalive_send {
-    $port->write("t vol+\r");
+    $port->write("t back\r");
 }
 
 sub keepalive_reset {
