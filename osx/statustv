@@ -1,0 +1,148 @@
+#! /usr/bin/perl
+
+use Modern::Perl;
+use Device::SerialPort;
+use Mac::AppleScript::Glue;
+use Time::HiRes qw/sleep gettimeofday/;
+
+use feature "switch";
+
+use Data::Dumper;
+
+use constant PORT => "/dev/cu.usbserial-A7006U7G";
+use constant PORT_SPEED => 115200;
+use constant CAROUSEL_DELAY => 60;
+use constant CAROUSEL_PAUSE => 600;
+use constant KEEPALIVE_DELAY => 600;
+use constant APP_NAME => "StatusTV";
+use constant TERMINAL_NOTIFIER => "/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier";
+
+our $port;
+
+our $carousel_next;
+our $carousel_running = 1;
+
+our $keepalive_next;
+
+sub open_port {
+    my $port = Device::SerialPort->new(PORT);
+    $port->baudrate(PORT_SPEED); # you may change this value
+    $port->databits(8); # but not this and the two following
+    $port->parity("none");
+    $port->stopbits(1);
+    $port->handshake("off");
+    $port->write_settings();
+
+    return $port;
+}
+
+sub chrome_next_tab {
+    my $offset = shift || 1;
+    my $chrome = new Mac::AppleScript::Glue::Application('Chrome');
+    my $window = $chrome->windows(1);
+    
+    my $ntabs = @{$window->tabs};
+    my $idx = $window->active_tab_index + $offset;
+    $idx = (($idx - 1) % $ntabs) + 1; # tab idx is 1-based
+     
+    $window->set(active_tab_index => $idx);
+}
+
+sub process_ir {
+    my $line = shift;
+
+    my ($tag, $data, $ir_cmd) = split / /, $line;
+    return if $tag ne "R"; 
+    
+    for($ir_cmd) {
+        when (/rewind/) { chrome_next_tab(-1); carousel_reset(); };
+        when (/forward/) { chrome_next_tab(1); carousel_reset(); };
+        when (/pause/) { carousel_pause() };
+        when (/play/) { carousel_start() };
+        when (/stop/) { carousel_stop() };
+    }
+}
+
+sub check_port {
+    my $s = $port->lookfor();
+
+    if ($s ne "") {
+        process_ir($s);
+    }
+ 
+    $port->lookclear();
+}
+
+sub carousel_start {
+    if ($carousel_running) {
+        notify("Tab rotation already running.");
+        return;
+    }
+    my $next = CAROUSEL_DELAY / 10;
+    notify("Tab rotation started.");
+    $carousel_running = 1;
+    
+}
+
+sub carousel_stop {
+    my $already = $carousel_running ? "" : " already";
+    notify("Tab rotation$already stopped.");
+    $carousel_running = 0;
+}
+
+sub carousel_pause {
+    my $msg = "Will resume in " . CAROUSEL_PAUSE . " seconds";
+    notify("Tab rotation paused.", $msg); 
+    $carousel_next = gettimeofday() + CAROUSEL_PAUSE;
+}
+
+
+sub carousel_reset {
+    $carousel_next = gettimeofday() + CAROUSEL_DELAY;
+}
+
+
+sub check_timer {
+    return if not $carousel_running;
+
+    my $now = gettimeofday;
+
+    if ($now >= $carousel_next) {
+        chrome_next_tab();
+        carousel_reset();
+    }
+
+    if ($now >= $keepalive_next) {
+        keepalive_send();
+        keepalive_reset();
+    }
+}
+
+sub keepalive_send {
+    $port->write("t vol+\r");
+}
+
+sub keepalive_reset {
+    $keepalive_next = gettimeofday + KEEPALIVE_DELAY;
+}
+
+sub notify {
+    my ($subtitle, $message) = @_;
+
+    $subtitle ||= "";
+    $message ||= "";
+
+    my $cmd = TERMINAL_NOTIFIER . " -message '$message' -title '" . APP_NAME . "' -subtitle '$subtitle' >/dev/null";
+    `$cmd`;
+}
+
+$port = open_port();
+carousel_reset();
+keepalive_reset();
+
+notify("Welcome!");
+while (1) {
+    check_port();
+    check_timer();
+    sleep 0.05;
+}
